@@ -1,0 +1,286 @@
+// ============================================================================
+//  Atmosphere LUT Precomputation
+//  Computes Transmittance (2D) and Scattering (3D) lookup tables
+//  Ported from Photon's precomputed atmospheric scattering (Bruneton 2020)
+// ============================================================================
+
+#pragma kernel BakeTransmittance
+#pragma kernel BakeScattering
+
+#include "Include/Common.hlsl"
+#include "Include/FastMath.hlsl"
+#include "Include/ColorSpace.hlsl"
+#include "Include/Geometry.hlsl"
+#include "Include/PhaseFunction.hlsl"
+#include "Include/Atmosphere.hlsl"
+
+// --- Output textures ---
+RWTexture2D<float4> _TransmittanceLUT;  // 256 x 64
+RWTexture3D<float4> _ScatteringLUT;     // 32 x 64 x 32 (nu*2 x mu x mu_s)
+
+// --- Input textures (scattering pass reads transmittance) ---
+Texture2D<float4> _TransmittanceLUTRead;
+SamplerState sampler_TransmittanceLUTRead;
+
+// Sun direction for scattering precomputation
+float3 _SunDir;
+
+// ============================================================================
+//  Transmittance LUT
+//  Integrates optical depth along a ray from position (r, mu) to atmosphere top
+//  Resolution: 256 (mu) x 64 (r)
+// ============================================================================
+
+float3 compute_transmittance(float mu, float r) {
+    // Ray direction: from position at altitude r, looking at angle mu from zenith
+    // Find distance to atmosphere outer boundary
+    float t_max = intersect_sphere(mu, r, atmosphere_outer_radius).y;
+    if (t_max < 0.0) return float3(1.0, 1.0, 1.0);
+
+    // Check if ray hits the planet
+    if (intersect_sphere(mu, r, planet_radius).x >= 0.0) return float3(0.0, 0.0, 0.0);
+
+    const int STEPS = 40;
+    float dt = t_max / (float)STEPS;
+
+    float3 optical_depth = float3(0.0, 0.0, 0.0);
+
+    float3 rayleigh_coeff = air_rayleigh_coefficient;
+    float3 mie_coeff = air_mie_coefficient;
+    float3 ozone_coeff = air_ozone_coefficient;
+
+    for (int i = 0; i < STEPS; i++) {
+        float t = (i + 0.5) * dt;
+
+        // Position along the ray
+        float r_sample = sqrt(r * r + 2.0 * r * mu * t + t * t);
+
+        // Get density at this altitude
+        float3 density = atmosphere_density(r_sample);
+
+        // Accumulate optical depth
+        optical_depth += (rayleigh_coeff * density.x + mie_coeff * density.y + ozone_coeff * density.z) * dt;
+    }
+
+    return exp(-optical_depth);
+}
+
+[numthreads(8, 8, 1)]
+void BakeTransmittance(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= (uint)transmittance_res.x || id.y >= (uint)transmittance_res.y) return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(transmittance_res);
+
+    float mu, r;
+    atmosphere_transmittance_uv_to_mu_r(uv, mu, r);
+
+    float3 transmittance = compute_transmittance(mu, r);
+
+    _TransmittanceLUT[id.xy] = float4(transmittance, 1.0);
+}
+
+// ============================================================================
+//  Scattering LUT
+//  Precomputes single + multiple scattering for sun light
+//  Resolution: 32 (nu*2) x 64 (mu) x 32 (mu_s)
+//  Left half (u < 0.5): Rayleigh + multiple scattering
+//  Right half (u >= 0.5): Single Mie scattering
+// ============================================================================
+
+// Sample the transmittance LUT
+float3 sample_transmittance(float mu, float r) {
+    if (intersect_sphere(mu, r, planet_radius).x >= 0.0) return float3(0.0, 0.0, 0.0);
+
+    float2 uv = atmosphere_transmittance_uv(mu, r);
+    return _TransmittanceLUTRead.SampleLevel(sampler_TransmittanceLUTRead, uv, 0).rgb;
+}
+
+// Get transmittance between two points along a ray
+float3 transmittance_between(float mu, float r, float d) {
+    float r_d = sqrt(r * r + 2.0 * r * mu * d + d * d);
+    float mu_d = (r * mu + d) / r_d;
+
+    float3 trans_from_r = sample_transmittance(mu, r);
+    float3 trans_from_rd = sample_transmittance(mu_d, r_d);
+
+    // Avoid division by zero
+    float3 result;
+    result.x = trans_from_r.x > 1e-10 ? trans_from_rd.x / trans_from_r.x : 0.0;
+    result.y = trans_from_r.y > 1e-10 ? trans_from_rd.y / trans_from_r.y : 0.0;
+    result.z = trans_from_r.z > 1e-10 ? trans_from_rd.z / trans_from_r.z : 0.0;
+
+    return clamp01(result);
+}
+
+// Decode scattering LUT coordinates back to (nu, mu, mu_s)
+void scattering_uv_to_params(uint3 id, out float nu, out float mu, out float mu_s) {
+    // id.x: 0..31 (left half = rayleigh, right half = mie, each 16 wide)
+    // id.y: 0..63 (mu)
+    // id.z: 0..31 (mu_s)
+    // For compute, we treat the full 32-wide x as nu (0..15 = rayleigh half, 16..31 = mie half)
+    // But actually the 3D LUT is sampled with nu in x, mu in y, mu_s in z
+
+    int nu_res = scattering_res.x; // 16
+    int mu_res = scattering_res.y; // 64
+    int mu_s_res = scattering_res.z; // 32
+
+    // The x dimension is doubled (32) to store both rayleigh+multi and single mie
+    // We only compute nu for the first half (0..15), the second half (16..31) stores the same nu but mie data
+    int nu_idx = id.x % nu_res;
+
+    float u_nu = get_unit_range_from_uv((nu_idx + 0.5) / (float)nu_res, nu_res);
+    float u_mu = (id.y + 0.5) / (float)mu_res;
+    float u_mu_s = get_unit_range_from_uv((id.z + 0.5) / (float)mu_s_res, mu_s_res);
+
+    // --- Decode mu_s ---
+    const float H = sqrt(atmosphere_outer_radius_sq - atmosphere_inner_radius_sq);
+    const float d_s_min = atmosphere_thickness;
+    const float d_s_max = H;
+
+    float D = intersect_sphere(min_mu_s, atmosphere_inner_radius, atmosphere_outer_radius).y;
+    float A = (D - d_s_min) / (d_s_max - d_s_min);
+
+    // u_mu_s = max0(1 - a/A) / (1 + a)  =>  solve for a
+    // Let u = u_mu_s, then: u(1+a) = 1 - a/A => u + ua = 1 - a/A => a(u + 1/A) = 1 - u
+    // a = (1-u) / (u + 1/A)
+    float a = (1.0 - u_mu_s) / (u_mu_s + 1.0 / A);
+    float d_s = a * (d_s_max - d_s_min) + d_s_min;
+    // d_s = intersect_sphere(mu_s, atmosphere_inner_radius, atmosphere_outer_radius).y
+    // = -atmosphere_inner_radius * mu_s + sqrt(atmosphere_inner_radius^2 * mu_s^2 - atmosphere_inner_radius^2 + atmosphere_outer_radius^2)
+    // Solve for mu_s:
+    float ri = atmosphere_inner_radius;
+    float ro = atmosphere_outer_radius;
+    // d_s = -ri*mu_s + sqrt(ri^2*mu_s^2 - ri^2 + ro^2)
+    // (d_s + ri*mu_s)^2 = ri^2*mu_s^2 - ri^2 + ro^2
+    // d_s^2 + 2*d_s*ri*mu_s + ri^2*mu_s^2 = ri^2*mu_s^2 - ri^2 + ro^2
+    // d_s^2 + 2*d_s*ri*mu_s = -ri^2 + ro^2
+    // mu_s = (ro^2 - ri^2 - d_s^2) / (2 * d_s * ri)
+    mu_s = (ro * ro - ri * ri - d_s * d_s) / (2.0 * d_s * ri);
+    mu_s = clamp(mu_s, -1.0, 1.0);
+
+    // --- Decode mu ---
+    const float r = planet_radius;
+    const float rho = sqrt(max0(planet_radius * planet_radius - atmosphere_inner_radius_sq));
+
+    // Undo horizon stretch
+    if (u_mu < 0.5) {
+        float u_mu_local = get_unit_range_from_uv(2.0 * (0.5 - u_mu), mu_res / 2);
+        float d_min = r - atmosphere_inner_radius;
+        float d_max_local = rho;
+        float d = u_mu_local * (d_max_local - d_min) + d_min;
+
+        mu = -(d * d + 2.0 * r * d) / (2.0 * r * (d + EPS));
+    } else {
+        float u_mu_local = get_unit_range_from_uv(2.0 * (u_mu - 0.5), mu_res / 2);
+        float d_min = atmosphere_outer_radius - r;
+        float d_max_local = rho + H;
+        float d = u_mu_local * (d_max_local - d_min) + d_min;
+
+        mu = (H * H - rho * rho - d * d) / (2.0 * r * d + EPS);
+    }
+
+    // Undo the sqrt(sqrt(mu)) stretch for mu > 0
+    // The forward mapping is: if (mu > 0) mu_mapped = mu * sqrt(sqrt(mu))
+    // So mu_mapped = mu^(1 + 1/4) = mu^(5/4)
+    // Inverse: mu = mu_mapped^(4/5)
+    if (mu > 0.0) {
+        mu = pow(abs(mu), 4.0 / 5.0);
+    }
+
+    mu = clamp(mu, -1.0, 1.0);
+
+    // --- Decode nu ---
+    float half_range_nu = sqrt(max0((1.0 - mu * mu) * (1.0 - mu_s * mu_s)));
+    float nu_min = mu * mu_s - half_range_nu;
+    float nu_max = mu * mu_s + half_range_nu;
+
+    nu = lerp(nu_min, nu_max, u_nu);
+    nu = clamp(nu, -1.0, 1.0);
+}
+
+[numthreads(4, 4, 4)]
+void BakeScattering(uint3 id : SV_DispatchThreadID) {
+    // Total LUT size: 32 x 64 x 32
+    if (id.x >= 32 || id.y >= 64 || id.z >= 32) return;
+
+    // Determine if this is the rayleigh half or mie half
+    bool is_mie_half = (id.x >= 16);
+    uint nu_idx = id.x % 16;
+
+    // Decode parameters using the rayleigh-half coordinates
+    uint3 decode_id = uint3(nu_idx, id.y, id.z);
+    float nu, mu, mu_s;
+    scattering_uv_to_params(decode_id, nu, mu, mu_s);
+
+    // --- Ray march through atmosphere ---
+    const float r_start = planet_radius;
+    float t_max = intersect_sphere(mu, r_start, atmosphere_outer_radius).y;
+    if (t_max < 0.0) {
+        _ScatteringLUT[id] = float4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    // Check planet intersection
+    if (mu < 0.0 && intersect_sphere(mu, r_start, planet_radius).x >= 0.0) {
+        t_max = intersect_sphere(mu, r_start, planet_radius).x;
+    }
+
+    const int STEPS = 32;
+    float dt = t_max / (float)STEPS;
+
+    float3 rayleigh_coeff = air_rayleigh_coefficient;
+    float3 mie_coeff_full = air_mie_coefficient;
+    float3 mie_coeff_scat = air_mie_albedo * mie_coeff_full;
+
+    float3 rayleigh_sum = float3(0.0, 0.0, 0.0);
+    float3 mie_sum = float3(0.0, 0.0, 0.0);
+    float3 multi_sum = float3(0.0, 0.0, 0.0);
+
+    // Construct ray direction and light direction from (nu, mu, mu_s)
+    // View direction: (sin_theta_v, mu, 0) where sin_theta_v = sqrt(1 - mu^2)
+    // We don't need actual direction vectors; we use parametric form
+
+    for (int i = 0; i < STEPS; i++) {
+        float t = (i + 0.5) * dt;
+
+        // Current position along view ray
+        float r_sample = sqrt(r_start * r_start + 2.0 * r_start * mu * t + t * t);
+        float mu_sample = (r_start * mu + t) / r_sample;
+
+        // Transmittance from viewer to this sample point
+        float3 trans_to_sample = transmittance_between(mu, r_start, t);
+
+        // Density at sample point
+        float3 density = atmosphere_density(r_sample);
+
+        // Transmittance from sample point to the sun
+        // mu_s_sample = cos angle between sample-to-center and light direction
+        // Using the relation: r_sample * mu_s_sample = r_start * mu_s + t * nu_s
+        // where nu_s = cos(view, light) = nu
+        // Actually: the light direction's zenith angle at the sample point
+        float mu_s_sample = (r_start * mu_s + t * nu) / r_sample;
+        float3 trans_to_sun = sample_transmittance(mu_s_sample, r_sample);
+
+        // Scattering contribution
+        float3 scatter_weight = trans_to_sample * trans_to_sun * dt;
+
+        rayleigh_sum += density.x * rayleigh_coeff * scatter_weight;
+        mie_sum += density.y * mie_coeff_scat * scatter_weight;
+
+        // Multiple scattering approximation (isotropic)
+        float3 multi_weight = trans_to_sample * dt * isotropic_phase;
+        multi_sum += (density.x * rayleigh_coeff + density.y * mie_coeff_scat) * multi_weight;
+    }
+
+    // Apply phase functions
+    float3 rayleigh_phase_val = rayleigh_phase(nu);
+
+    if (is_mie_half) {
+        // Store single Mie scattering (phase will be applied at sample time)
+        _ScatteringLUT[id] = float4(mie_sum, 1.0);
+    } else {
+        // Store Rayleigh scattering + multiple scattering estimate
+        float3 result = rayleigh_sum * rayleigh_phase_val + multi_sum;
+        _ScatteringLUT[id] = float4(result, 1.0);
+    }
+}

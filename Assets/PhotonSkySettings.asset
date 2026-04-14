@@ -1,0 +1,43 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7e35649c273f13749ac2aadae24893b5, type: 3}
+  m_Name: PhotonSkySettings
+  m_EditorClassIdentifier: 
+  timeOfDay: 1.11
+  daySpeed: 5.37
+  autoTime: 1
+  sunIntensity: 7
+  sunTintMorning: {r: 1, g: 1, b: 1, a: 1}
+  sunTintNoon: {r: 1, g: 1, b: 1, a: 1}
+  sunTintEvening: {r: 1, g: 1, b: 1, a: 1}
+  sunPathTilt: 30
+  moonIntensity: 0.66
+  moonTint: {r: 0.6, g: 0.7, b: 1, a: 1}
+  moonPhaseBrightness: 1
+  rainStrength: 0
+  biomeCave: 0
+  biomeMaySnow: 0
+  enableCumulusClouds: 1
+  cloudsCuCoverageMin: 0.3
+  cloudsCuCoverageMax: 0.6
+  cloudsCuAltitude: 1500
+  cloudsCuThickness: 0.5
+  cloudsCuDensity: 0.1
+  enableAltocumulusClouds: 1
+  cloudsAcCoverageMin: 0.2
+  cloudsAcCoverageMax: 0.5
+  cloudsAcAltitude: 3000
+  cloudsAcThickness: 0.25
+  enableCirrusClouds: 1
+  cloudsCiCoverageMin: 0.3
+  cloudsCiCoverageMax: 0.5
+  cloudsCiAltitude: 10000

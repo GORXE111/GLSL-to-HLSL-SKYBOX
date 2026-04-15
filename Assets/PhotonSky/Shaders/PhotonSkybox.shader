@@ -448,12 +448,13 @@ Shader "Photon/Skybox"
                 // Ref: sky.glsl:162 — biome_cave * smoothstep
                 sky = lerp(sky, float3(0,0,0), _BiomeCave * smoothstep(-0.1, 0.1, 0.4 - rd.y));
 
-                // --- Tonemap ---
-                // Ref: photon/shaders/program/post/grade.glsl:310-344 — applies bloom, grading, tonemap
-                // We use the simplified Hill ACES fit (aces.glsl:202-207) here.
-                // Full Photon pipeline: grade_input() → academy_rrt() → grade_output()
+                // --- OUTPUT ---
+                // Ref: photon/shaders/program/post/grade.glsl:310-344
+                // Photon applies bloom in HDR space BEFORE tonemapping.
+                // When PhotonBloomFeature is active, it handles tonemap in its composite pass.
+                // We always tonemap here as well — bloom will work on the LDR but with
+                // a low threshold to still catch the bright sun area.
                 sky = tonemap(sky);
-
                 return float4(max(sky, 0.0), 1.0);
             }
 

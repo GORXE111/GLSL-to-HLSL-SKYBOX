@@ -295,38 +295,128 @@ Shader "Photon/Skybox"
             }
 
             // ================================================================
-            //  ACES tonemap (simplified Hill fit)
-            //  Ref: photon/shaders/include/aces/aces.glsl:202-207
-            //  RRT+ODT fit by Stephen Hill (TheRealMJP/BakingLab)
-            //  Photon uses the full segmented spline ACES in grade.glsl:191-199,
-            //  but also offers this fit as rrt_and_odt_fit() in aces.glsl:202.
-            //  We use sRGB↔AP1 matrices for the ACEScg conversion.
+            //  Tonemap: Lottes 2016 (Photon default)
+            //  Ref: photon/shaders/program/post/grade.glsl:236-253
+            //  settings.glsl:355 — "#define tonemap tonemap_lottes"
+            //  Source: "Advanced Techniques and Optimization of HDR Color Pipelines"
+            //  https://gpuopen.com/wp-content/uploads/2016/03/GdcVdrLottes.pdf
             // ================================================================
-            float3 aces_hill(float3 x) {
-                // aces.glsl:203-205
-                float3 a = x * (x + 0.0245786) - 0.000090537;
-                float3 b = x * (0.983729 * x + 0.4329510) + 0.238081;
-                return a / b;
+            float3 tonemap_lottes(float3 rgb) {
+                // grade.glsl:239-243 — Lottes curve parameters
+                const float3 a       = float3(1.5, 1.5, 1.5);     // Contrast
+                const float3 d       = float3(0.91, 0.91, 0.91);  // Shoulder contrast
+                const float3 hdr_max = float3(8.0, 8.0, 8.0);     // White point
+                const float3 mid_in  = float3(0.26, 0.26, 0.26);  // Fixed midpoint x
+                const float3 mid_out = float3(0.32, 0.32, 0.32);  // Fixed midpoint y
+
+                // grade.glsl:245-250 — precomputed curve coefficients
+                float3 b_coeff = (-pow(mid_in, a) + pow(hdr_max, a) * mid_out) /
+                    ((pow(hdr_max, a * d) - pow(mid_in, a * d)) * mid_out);
+                float3 c_coeff = (pow(hdr_max, a * d) * pow(mid_in, a) - pow(hdr_max, a) * pow(mid_in, a * d) * mid_out) /
+                    ((pow(hdr_max, a * d) - pow(mid_in, a * d)) * mid_out);
+
+                // grade.glsl:252
+                return pow(abs(rgb), a) / (pow(abs(rgb), a * d) * b_coeff + c_coeff);
             }
 
-            float3 tonemap(float3 col) {
-                // Simplified Rec.709 ↔ AP1 matrices (without D60/D65 chromatic adaptation)
-                // Full version: photon/shaders/include/aces/matrices.glsl:43-50
-                static const float3x3 srgb_to_ap1 = float3x3(
-                    0.6131, 0.3395, 0.0474,
-                    0.0702, 0.9164, 0.0134,
-                    0.0206, 0.1096, 0.8698
-                );
-                static const float3x3 ap1_to_srgb = float3x3(
-                     1.7051, -0.6218, -0.0833,
-                    -0.1302,  1.1408, -0.0106,
-                    -0.0240, -0.1290,  1.1530
-                );
+            // ================================================================
+            //  Color grading — pre-tonemap
+            //  Ref: photon/shaders/program/post/grade.glsl:119-151
+            //  Applied in HDR space before tonemapping.
+            //  Default values: brightness=0.83, contrast=1.0, saturation=0.98
+            // ================================================================
+            float3 grade_input(float3 rgb) {
+                // grade.glsl:122-124 — defaults from settings.glsl:358-360
+                const float brightness = 0.83; // 0.83 * GRADE_BRIGHTNESS(1.0)
+                const float contrast   = 1.00; // 1.00 * GRADE_CONTRAST(1.0)
+                const float saturation = 0.98; // 0.98 * GRADE_SATURATION(1.0)
 
-                col = mul(srgb_to_ap1, col);
-                col = aces_hill(col);
-                col = mul(ap1_to_srgb, col);
-                return saturate(col);
+                // grade.glsl:127 — brightness
+                rgb *= brightness;
+
+                // grade.glsl:130-133 — contrast (log-space around midpoint 0.18)
+                const float log_midpoint = -2.473931; // log2(0.18)
+                rgb = log2(max(rgb, 1e-6));
+                rgb = contrast * (rgb - log_midpoint) + log_midpoint;
+                rgb = max(exp2(rgb) - 1e-6, 0.0);
+
+                // grade.glsl:136-137 — saturation
+                static const float3 lum_w = float3(0.2627, 0.6780, 0.0593); // Rec.2020 weights
+                float lum = dot(rgb, lum_w);
+                rgb = max(lerp(float3(lum,lum,lum), rgb, saturation), 0.0);
+
+                return rgb;
+            }
+
+            // ================================================================
+            //  Color grading — post-tonemap
+            //  Ref: photon/shaders/program/post/grade.glsl:155-186
+            //  Applied in LDR [0,1] space after tonemapping.
+            //  Boosts teal saturation (sky color richness) and applies gain.
+            // ================================================================
+            float3 rgb_to_hsl_inline(float3 c) {
+                // Ref: utility/color.glsl:72-82
+                float4 K = float4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+                float4 p = (c.b < c.g) ? float4(c.bg, K.wz) : float4(c.gb, K.xy);
+                float4 q = (p.x < c.r) ? float4(c.r, p.yzx) : float4(p.xyw, c.r);
+                float d = q.x - min(q.w, q.y);
+                float e = 1e-6;
+                return float3(abs(q.z + (q.w - q.y) / (6.0*d+e)), d / (q.x+e), q.x);
+            }
+
+            float3 hsl_to_rgb_inline(float3 c) {
+                // Ref: utility/color.glsl:83-91
+                float4 K = float4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+                c.yz = saturate(c.yz);
+                float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+                return c.z * lerp(K.xxx, saturate(p - K.xxx), c.y);
+            }
+
+            float isolate_hue_inline(float3 hsl, float center, float width) {
+                // Ref: utility/color.glsl:126-129
+                if (hsl.y < 1e-2 || hsl.z < 1e-2) return 0.0;
+                float x = abs(hsl.x * 360.0 - center) / width;
+                return x > 1.0 ? 0.0 : (1.0 - x*x*(3.0-2.0*x)); // cubic_smooth(1-x)
+            }
+
+            float3 grade_output(float3 rgb) {
+                // grade.glsl:157 — work in perceptual (sqrt) space
+                rgb = sqrt(max(rgb, 0.0));
+
+                float3 hsl = rgb_to_hsl_inline(rgb);
+
+                // grade.glsl:169-170 — orange sat boost (default 0.0, skip)
+                // grade.glsl:173-174 — teal sat boost (default 0.10)
+                float teal = isolate_hue_inline(hsl, 210.0, 20.0);
+                hsl.y *= 1.0 + 0.10 * teal; // settings.glsl:363 — GRADE_TEAL_SAT_BOOST = 0.10
+
+                rgb = hsl_to_rgb_inline(hsl);
+
+                // grade.glsl:183 — gain(rgb, 1.05)
+                // gain function: 0.5 * pow(2*x, k) for x<0.5, 1 - 0.5*pow(2*(1-x), k) for x>=0.5
+                float3 gx = lerp(rgb, 1.0 - rgb, step(0.5, rgb));
+                float3 ga = 0.5 * pow(max(2.0 * gx, 0.0), float3(1.05, 1.05, 1.05));
+                rgb = lerp(ga, 1.0 - ga, step(0.5, rgb));
+
+                // grade.glsl:185 — back to linear
+                return rgb * rgb;
+            }
+
+            // ================================================================
+            //  Full tonemap pipeline (matching Photon grade.glsl:310-344)
+            // ================================================================
+            float3 tonemap(float3 col) {
+                // grade.glsl:336 — grade_input (pre-tonemap color grading)
+                col = grade_input(col);
+
+                // grade.glsl:340 — tonemap (Lottes, Photon default)
+                col = tonemap_lottes(col);
+                col = saturate(col);
+
+                // grade.glsl:345 — grade_output (post-tonemap color grading)
+                col = grade_output(col);
+
+                return col;
             }
 
             // ================================================================
@@ -350,13 +440,30 @@ Shader "Photon/Skybox"
                 float sun_valid = step(0.01, length(sun_dir));
                 sun_dir = sun_valid > 0.5 ? normalize(sun_dir) : float3(0, 1, 0);
 
+                // --- Sun exposure (time-varying) ---
+                // Ref: photon/shaders/include/light/colors/light_color.glsl:10-18
+                // get_sun_exposure(): base_scale=7.0, boosted during sunrise/sunset/blue hour
+                float blue_hour = saturate(exp(-190.0 * sqr(sun_dir.y + 0.09604))); // light_color.glsl:13
+                blue_hour = max(0.0, (blue_hour - 0.05) / 0.95);                    // light_color.glsl:21 threshold
+
+                // light_color.glsl:15 — time weights for sunrise/sunset
+                float t_sunrise = saturate(1.0 - abs(sun_dir.y - 0.15) / 0.2) * step(sun_dir.y, 0.5);
+                float t_sunset  = saturate(1.0 - abs(sun_dir.y - 0.15) / 0.2) * step(0.0, sun_dir.y) * (1.0 - step(sun_dir.y, 0.5));
+
+                // light_color.glsl:15 — daytime exposure multiplier
+                float daytime_mul = 1.0 + 0.5 * (t_sunset + t_sunrise) + 40.0 * blue_hour;
+                float sun_E = 7.0 * daytime_mul; // light_color.glsl:11 — base_scale = 7.0 * SUN_I
+
                 // --- Sun irradiance ---
-                // Ref: photon/shaders/include/light/colors/light_color.glsl:53-58
-                // get_light_color() applies exposure * tint * sunlight_color * transmittance
+                // Ref: light_color.glsl:53-58 — get_light_color()
                 float3 sun_trans = atmo_transmittance(sun_dir.y, R_PLANET);
-                float sun_E = 6.0; // approximate get_sun_exposure() at midday (light_color.glsl:11)
                 float3 sun_irr = sun_E * SUNLIGHT_COLOR * sun_trans;
                 sun_irr *= smoothstep(-0.05, 0.1, sun_dir.y); // light_color.glsl:56 — fade during transition
+                // light_color.glsl:57 — slight dimming near horizon to prevent over-brightness
+                float horizon_pulse = abs(sun_dir.y) - 0.15;
+                float hp = abs(horizon_pulse) / 0.11;
+                float hp_smooth = hp > 1.0 ? 0.0 : 1.0 - hp*hp*(3.0-2.0*hp);
+                sun_irr *= 1.0 - 0.25 * hp_smooth;
 
                 // --- Moon irradiance ---
                 // Ref: light_color.glsl:41-45 — get_moon_exposure()

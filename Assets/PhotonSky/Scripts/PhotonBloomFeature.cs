@@ -1,15 +1,10 @@
 // ============================================================================
 // PhotonBloomFeature.cs
 // URP ScriptableRendererFeature for Photon's multi-scale bloom.
-// Source: photon/shaders/program/post/bloom/ (4 files)
-//         photon/shaders/program/post/grade.glsl (bloom compositing)
+// Ref: photon/shaders/program/post/bloom/*.glsl
+//      photon/shaders/program/post/grade.glsl:317-322
 //
-// Photon bloom pipeline reference:
-//   downsample.glsl  — 6x6 overlapping box kernel (COD AW method)
-//   gaussian0.glsl   — horizontal 9-tap binomial blur per tile
-//   gaussian1.glsl   — vertical 9-tap binomial blur per tile
-//   grade.glsl:65-110 — get_bloom() merges 6 tiles with weight decay
-//   grade.glsl:317-322 — mix(scene, bloom, 0.12 * BLOOM_INTENSITY)
+// Uses cmd.Blit() with temporary RT IDs for URP 2022.3 compatibility.
 // ============================================================================
 
 using UnityEngine;
@@ -23,10 +18,8 @@ namespace PhotonSky
         [System.Serializable]
         public class BloomSettings
         {
-            // Ref: grade.glsl:320 — bloom_intensity = 0.12 * BLOOM_INTENSITY
-            // settings.glsl:338 — BLOOM_INTENSITY default 1.0, so default blend = 0.12
-            [Range(0f, 1f)] public float threshold = 0.4f;  // Lower for post-tonemap LDR
-            [Range(0f, 1f)] public float intensity = 0.12f; // Matches Photon default
+            [Range(0f, 1f)] public float threshold = 0.4f;
+            [Range(0f, 1f)] public float intensity = 0.12f;
             [Range(0f, 2f)] public float radius = 1.0f;
             [Range(2, 6)] public int mipCount = 5;
         }
@@ -48,9 +41,7 @@ namespace PhotonSky
             if (_bloomMaterial != null)
             {
                 _bloomPass = new PhotonBloomPass(_bloomMaterial, settings);
-                // Ref: grade.glsl runs after all scene rendering and TAA
-                // AfterRenderingPostProcessing ensures skybox is fully rendered
-                _bloomPass.renderPassEvent = RenderPassEvent.AfterRenderingPostProcessing;
+                _bloomPass.renderPassEvent = RenderPassEvent.BeforeRenderingPostProcessing;
             }
         }
 
@@ -66,17 +57,16 @@ namespace PhotonSky
 
         protected override void Dispose(bool disposing)
         {
-            _bloomPass?.Dispose();
             CoreUtils.Destroy(_bloomMaterial);
         }
     }
 
     public class PhotonBloomPass : ScriptableRenderPass
     {
-        private Material _material;
+        private Material _mat;
         private PhotonBloomFeature.BloomSettings _settings;
 
-        // Pass indices matching PhotonBloom.shader
+        // Pass indices
         private const int PassPrefilter = 0;
         private const int PassBlurH     = 1;
         private const int PassBlurV     = 2;
@@ -88,16 +78,24 @@ namespace PhotonSky
         private static readonly int BloomRadiusId    = Shader.PropertyToID("_BloomRadius");
         private static readonly int BloomLowMipId    = Shader.PropertyToID("_BloomLowMip");
 
-        private RTHandle[] _mipDown;
-        private RTHandle[] _mipUp;
-        private RTHandle _tempRT; // Temp RT to avoid read/write to same target
+        // Use int IDs for temporary RTs (reliable in all URP versions)
+        private int[] _downIds;
+        private int[] _upIds;
+        private int _tempId;
 
         public PhotonBloomPass(Material material, PhotonBloomFeature.BloomSettings settings)
         {
-            _material = material;
+            _mat = material;
             _settings = settings;
-            _mipDown = new RTHandle[7];
-            _mipUp = new RTHandle[7];
+
+            _downIds = new int[7];
+            _upIds = new int[7];
+            for (int i = 0; i < 7; i++)
+            {
+                _downIds[i] = Shader.PropertyToID($"_PhotonBloomDown{i}");
+                _upIds[i] = Shader.PropertyToID($"_PhotonBloomUp{i}");
+            }
+            _tempId = Shader.PropertyToID("_PhotonBloomTemp");
         }
 
         public void Setup(PhotonBloomFeature.BloomSettings settings)
@@ -105,95 +103,80 @@ namespace PhotonSky
             _settings = settings;
         }
 
-        public override void OnCameraSetup(CommandBuffer cmd, ref RenderingData renderingData)
+        public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
         {
+            if (_mat == null || _settings.intensity <= 0) return;
+
+            CommandBuffer cmd = CommandBufferPool.Get("Photon Bloom");
             var desc = renderingData.cameraData.cameraTargetDescriptor;
             desc.depthBufferBits = 0;
             desc.msaaSamples = 1;
 
-            // Allocate temp RT at full resolution for the final composite blit
-            RenderingUtils.ReAllocateIfNeeded(ref _tempRT, desc, FilterMode.Bilinear, name: "_BloomTemp");
-
-            // Mip chain at half-res increments
-            int w = desc.width;
-            int h = desc.height;
-
-            for (int i = 0; i < _settings.mipCount; i++)
-            {
-                w = Mathf.Max(w / 2, 1);
-                h = Mathf.Max(h / 2, 1);
-
-                var mipDesc = desc;
-                mipDesc.width = w;
-                mipDesc.height = h;
-
-                RenderingUtils.ReAllocateIfNeeded(ref _mipDown[i], mipDesc, FilterMode.Bilinear, name: $"_BloomDown{i}");
-                RenderingUtils.ReAllocateIfNeeded(ref _mipUp[i], mipDesc, FilterMode.Bilinear, name: $"_BloomUp{i}");
-            }
-        }
-
-        public override void Execute(ScriptableRenderContext context, ref RenderingData renderingData)
-        {
-            if (_material == null || _settings.intensity <= 0) return;
-
-            CommandBuffer cmd = CommandBufferPool.Get("Photon Bloom");
-
             var source = renderingData.cameraData.renderer.cameraColorTargetHandle;
             int mipCount = _settings.mipCount;
 
-            _material.SetFloat(BloomThresholdId, _settings.threshold);
-            _material.SetFloat(BloomIntensityId, _settings.intensity);
-            _material.SetFloat(BloomRadiusId, _settings.radius);
+            _mat.SetFloat(BloomThresholdId, _settings.threshold);
+            _mat.SetFloat(BloomIntensityId, _settings.intensity);
+            _mat.SetFloat(BloomRadiusId, _settings.radius);
+
+            // Allocate temp RTs for mip chain
+            int w = desc.width;
+            int h = desc.height;
+            for (int i = 0; i < mipCount; i++)
+            {
+                w = Mathf.Max(w / 2, 1);
+                h = Mathf.Max(h / 2, 1);
+                cmd.GetTemporaryRT(_downIds[i], w, h, 0, FilterMode.Bilinear, RenderTextureFormat.DefaultHDR);
+                cmd.GetTemporaryRT(_upIds[i], w, h, 0, FilterMode.Bilinear, RenderTextureFormat.DefaultHDR);
+            }
+
+            // Full-res temp for final composite
+            cmd.GetTemporaryRT(_tempId, desc.width, desc.height, 0, FilterMode.Bilinear, desc.colorFormat);
 
             // --- Downsample chain ---
-            // Ref: bloom/downsample.glsl — progressive 6x6 downsample
-            // Mip 0: prefilter + downsample from scene
-            Blit(cmd, source, _mipDown[0], _material, PassPrefilter);
+            // Ref: bloom/downsample.glsl:73-94 — 6x6 overlapping box kernel
+            cmd.Blit(source, _downIds[0], _mat, PassPrefilter);
 
-            // Ref: bloom/gaussian0.glsl + gaussian1.glsl — 9-tap H+V blur per mip
-            Blit(cmd, _mipDown[0], _mipUp[0], _material, PassBlurH);
-            Blit(cmd, _mipUp[0], _mipDown[0], _material, PassBlurV);
+            // Ref: bloom/gaussian0.glsl + gaussian1.glsl — 9-tap blur
+            cmd.Blit(_downIds[0], _upIds[0], _mat, PassBlurH);
+            cmd.Blit(_upIds[0], _downIds[0], _mat, PassBlurV);
 
-            // Subsequent mips
             for (int i = 1; i < mipCount; i++)
             {
-                Blit(cmd, _mipDown[i - 1], _mipDown[i], _material, PassPrefilter);
-                Blit(cmd, _mipDown[i], _mipUp[i], _material, PassBlurH);
-                Blit(cmd, _mipUp[i], _mipDown[i], _material, PassBlurV);
+                cmd.Blit(_downIds[i - 1], _downIds[i], _mat, PassPrefilter);
+                cmd.Blit(_downIds[i], _upIds[i], _mat, PassBlurH);
+                cmd.Blit(_upIds[i], _downIds[i], _mat, PassBlurV);
             }
 
             // --- Upsample chain ---
-            // Ref: grade.glsl:82-109 — get_bloom() accumulates tiles with weight *= radius
-            // Start from smallest mip, progressively upsample and combine
-            Blit(cmd, _mipDown[mipCount - 1], _mipUp[mipCount - 1]);
+            // Ref: grade.glsl:82-109 — accumulate tiles with weight *= radius
+            cmd.Blit(_downIds[mipCount - 1], _upIds[mipCount - 1]);
 
             for (int i = mipCount - 2; i >= 0; i--)
             {
-                cmd.SetGlobalTexture(BloomLowMipId, _mipUp[i + 1]);
-                Blit(cmd, _mipDown[i], _mipUp[i], _material, PassUpsample);
+                cmd.SetGlobalTexture(BloomLowMipId, _upIds[i + 1]);
+                cmd.Blit(_downIds[i], _upIds[i], _mat, PassUpsample);
             }
 
             // --- Final composite ---
-            // Ref: grade.glsl:322 — scene_color = mix(scene_color, bloom, bloom_intensity)
-            // Cannot read+write same RT, so: source → temp (with bloom blend), then temp → source
-            cmd.SetGlobalTexture(BloomLowMipId, _mipUp[0]);
-            Blit(cmd, source, _tempRT, _material, PassComposite);
-            Blit(cmd, _tempRT, source);
+            // Ref: grade.glsl:322 — mix(scene_color, bloom, bloom_intensity)
+            // source → temp (blend bloom), then temp → source
+            cmd.SetGlobalTexture(BloomLowMipId, _upIds[0]);
+            cmd.Blit(source, _tempId, _mat, PassComposite);
+            cmd.Blit(_tempId, source);
+
+            // Release temp RTs
+            for (int i = 0; i < mipCount; i++)
+            {
+                cmd.ReleaseTemporaryRT(_downIds[i]);
+                cmd.ReleaseTemporaryRT(_upIds[i]);
+            }
+            cmd.ReleaseTemporaryRT(_tempId);
 
             context.ExecuteCommandBuffer(cmd);
             CommandBufferPool.Release(cmd);
         }
 
-        public override void OnCameraCleanup(CommandBuffer cmd) { }
-
-        public void Dispose()
-        {
-            _tempRT?.Release();
-            for (int i = 0; i < _mipDown.Length; i++)
-            {
-                _mipDown[i]?.Release();
-                _mipUp[i]?.Release();
-            }
-        }
+        public void Dispose() { }
     }
 }

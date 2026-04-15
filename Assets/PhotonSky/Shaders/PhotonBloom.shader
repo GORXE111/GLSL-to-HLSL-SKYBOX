@@ -52,19 +52,26 @@ Shader "Hidden/Photon/Bloom"
         return o;
     }
 
-    // Soft threshold — focuses bloom on bright areas (sun disk, specular highlights).
-    // Photon doesn't hard-threshold; it applies bloom to the full image with mix().
-    // We add a soft knee to emphasize bright sources (the sun disk at luminance=40
-    // will pass through strongly, while the blue sky at ~0.5 will be suppressed).
+    // Ref: Photon has NO prefilter. grade.glsl:65-109 (get_bloom) reads the full
+    // scene, downsamples and blurs without any threshold. The bloom naturally
+    // captures bright areas because in Photon's HDR pipeline, the sun is ~200x
+    // brighter than the sky, so it dominates the blurred mips.
+    //
+    // We follow the same approach: no threshold, full scene goes into bloom.
+    // The composite uses mix(scene, bloom, 0.12) which is always safe because
+    // bloom is just a blurred copy of the scene — never brighter, never darker
+    // on average.
+    //
+    // _BloomThreshold is kept as optional: when > 0, it acts as a soft bias
+    // to slightly emphasize brighter areas in the bloom, but default should be 0.
     float3 prefilter(float3 col)
     {
+        if (_BloomThreshold <= 0.001) return col; // No filtering (Photon default)
+
+        // Optional soft emphasis: brighten highlights in bloom without removing darks
         float brightness = max(col.r, max(col.g, col.b));
-        float soft = brightness - _BloomThreshold + 0.5;
-        soft = clamp(soft, 0.0, 1.0);
-        soft = soft * soft * 0.25;
-        float contribution = max(soft, brightness - _BloomThreshold);
-        contribution /= max(brightness, 1e-4);
-        return col * contribution;
+        float emphasis = 1.0 + max(brightness - _BloomThreshold, 0.0) * 2.0;
+        return col * emphasis;
     }
 
     ENDHLSL
@@ -264,7 +271,11 @@ Shader "Hidden/Photon/Bloom"
                 float3 scene = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.uv).rgb;
                 float3 bloom = SAMPLE_TEXTURE2D(_BloomLowMip, sampler_BloomLowMip, i.uv).rgb;
 
-                // grade.glsl:322 — mix(scene_color, bloom, bloom_intensity)
+                // Ref: grade.glsl:322 — scene_color = mix(scene_color, bloom, bloom_intensity)
+                // Photon uses exactly this: lerp between sharp scene and blurred bloom.
+                // Because bloom is a blurred copy of the FULL scene (no threshold),
+                // this is always safe: it slightly softens the image and spreads
+                // bright areas (sun glow) without darkening anything.
                 float3 col = lerp(scene, bloom, _BloomIntensity);
 
                 return float4(col, 1.0);

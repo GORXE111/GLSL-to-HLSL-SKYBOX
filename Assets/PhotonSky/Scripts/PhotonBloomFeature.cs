@@ -1,3 +1,22 @@
+// ============================================================================
+// PhotonBloomFeature.cs
+// URP ScriptableRendererFeature for Photon's multi-scale bloom.
+// Source: photon/shaders/program/post/bloom/ (4 files)
+//         photon/shaders/program/post/grade.glsl (bloom compositing)
+//
+// Photon bloom pipeline reference:
+//   downsample.glsl  — 6x6 overlapping box kernel (COD AW method)
+//   gaussian0.glsl   — horizontal 9-tap binomial blur per tile
+//   gaussian1.glsl   — vertical 9-tap binomial blur per tile
+//   merge_buffers.glsl — copy odd tiles between ping-pong buffers
+//   grade.glsl:65-110 — get_bloom() merges 6 tiles with weight decay
+//   grade.glsl:317-322 — mix(scene, bloom, 0.12 * BLOOM_INTENSITY)
+//
+// Photon packs all mip tiles into one texture using tile_offset/tile_scale.
+// We use separate RTs per mip level (standard for Unity), but the blur
+// kernels, weights, and compositing math are identical to Photon.
+// ============================================================================
+
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;

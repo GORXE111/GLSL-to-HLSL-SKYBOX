@@ -122,7 +122,7 @@ Material:
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
     - _Surface: 0
-    - _TimeOfDay: 14.1
+    - _TimeOfDay: 6.2
     - _WorkflowMode: 1
     - _ZWrite: 1
     m_Colors:

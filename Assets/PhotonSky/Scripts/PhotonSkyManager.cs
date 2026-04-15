@@ -154,22 +154,25 @@ namespace PhotonSky
 
         private void ComputeCelestialDirections(out Vector3 sunDir, out Vector3 moonDir, out float sunAngle)
         {
-            // sunAngle: 0 = noon, 0.25 = sunset, 0.5 = midnight, 0.75 = sunrise
-            sunAngle = (settings.timeOfDay / 24f + 0.25f) % 1f; // offset so noon=0.5 maps correctly
+            // Correct time mapping:
+            //   timeOfDay=0  (midnight) → angleRad=0   → sunDir.y = -1 (nadir)
+            //   timeOfDay=6  (sunrise)  → angleRad=π/2 → sunDir.y =  0 (horizon)
+            //   timeOfDay=12 (noon)     → angleRad=π   → sunDir.y = +1 (zenith)
+            //   timeOfDay=18 (sunset)   → angleRad=3π/2→ sunDir.y =  0 (horizon)
+            sunAngle = settings.timeOfDay / 24f;
 
             float angleRad = sunAngle * 2f * Mathf.PI;
             float tiltRad = settings.sunPathTilt * Mathf.Deg2Rad;
 
-            // Sun orbits in the Y-Z plane, tilted by sunPathTilt
+            // Sun orbits: Y = -cos(angle) gives correct noon=up, midnight=down
             sunDir = new Vector3(
                 Mathf.Sin(tiltRad) * Mathf.Sin(angleRad),
                 -Mathf.Cos(angleRad),
                 Mathf.Cos(tiltRad) * Mathf.Sin(angleRad)
             ).normalized;
 
-            // Moon is roughly opposite, offset slightly
-            moonDir = -sunDir;
-            moonDir = new Vector3(moonDir.x, moonDir.y + 0.1f, moonDir.z).normalized;
+            // Moon is opposite
+            moonDir = (-sunDir).normalized;
         }
 
         private void ComputeTimeWeights(Vector3 sunDir, out float timeSunrise, out float timeSunset)

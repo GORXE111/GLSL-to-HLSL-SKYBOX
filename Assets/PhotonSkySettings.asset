@@ -12,8 +12,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7e35649c273f13749ac2aadae24893b5, type: 3}
   m_Name: PhotonSkySettings
   m_EditorClassIdentifier: 
-  timeOfDay: 1.11
-  daySpeed: 5.37
+  timeOfDay: 12
+  daySpeed: 1
   autoTime: 1
   sunIntensity: 7
   sunTintMorning: {r: 1, g: 1, b: 1, a: 1}

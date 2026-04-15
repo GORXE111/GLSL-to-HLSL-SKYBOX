@@ -74,7 +74,7 @@ MonoBehaviour:
   m_Active: 1
   settings:
     threshold: 0
-    intensity: 0.12
+    intensity: 0.35
     radius: 1
     mipCount: 5
   bloomShader: {fileID: 4800000, guid: 1f7731e368585b04196404fe86bfe4c2, type: 3}

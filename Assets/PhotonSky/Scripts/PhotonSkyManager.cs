@@ -39,27 +39,11 @@ namespace PhotonSky
         private static readonly int PropAmbientColor = Shader.PropertyToID("_AmbientColor");
         private static readonly int PropSkyColorTint = Shader.PropertyToID("_SkyColorTint");
 
-        // Cloud uniforms
-        private static readonly int PropCloudsEnabled = Shader.PropertyToID("_CloudsEnabled");
-        private static readonly int PropCloudsCuEnabled = Shader.PropertyToID("_CloudsCuEnabled");
-        private static readonly int PropCloudsCuCoverage = Shader.PropertyToID("_CloudsCuCoverage");
-        private static readonly int PropCloudsCuAltitude = Shader.PropertyToID("_CloudsCuAltitude");
-        private static readonly int PropCloudsCuThickness = Shader.PropertyToID("_CloudsCuThickness");
-        private static readonly int PropCloudsCuDensity = Shader.PropertyToID("_CloudsCuDensity");
-        private static readonly int PropCloudsAcEnabled = Shader.PropertyToID("_CloudsAcEnabled");
-        private static readonly int PropCloudsAcCoverage = Shader.PropertyToID("_CloudsAcCoverage");
-        private static readonly int PropCloudsAcAltitude = Shader.PropertyToID("_CloudsAcAltitude");
-        private static readonly int PropCloudsAcThickness = Shader.PropertyToID("_CloudsAcThickness");
-        private static readonly int PropCloudsCiEnabled = Shader.PropertyToID("_CloudsCiEnabled");
-        private static readonly int PropCloudsCiCoverage = Shader.PropertyToID("_CloudsCiCoverage");
-        private static readonly int PropCloudsCiAltitude = Shader.PropertyToID("_CloudsCiAltitude");
-        private static readonly int PropCloudsCiThickness = Shader.PropertyToID("_CloudsCiThickness");
-        private static readonly int PropWorldAge = Shader.PropertyToID("_WorldAge");
-        private static readonly int PropCameraPosition = Shader.PropertyToID("_CameraPosition");
-        private static readonly int PropEyeAltitude = Shader.PropertyToID("_EyeAltitude");
-        private static readonly int PropNoiseTex = Shader.PropertyToID("_NoiseTex");
-        private static readonly int PropWorleyTex = Shader.PropertyToID("_WorleyTex");
-        private static readonly int PropCurlTex = Shader.PropertyToID("_CurlTex");
+        // Cloud uniforms (for CloudsInline.hlsl)
+        private static readonly int PropCloudsCoverage = Shader.PropertyToID("_CloudsCoverage");
+        private static readonly int PropCloudsAltitude = Shader.PropertyToID("_CloudsAltitude");
+        private static readonly int PropCloudsThickness = Shader.PropertyToID("_CloudsThickness");
+        private static readonly int PropCloudsSpeed = Shader.PropertyToID("_CloudsSpeed");
 
         // Sunlight color in space (from AM0 solar irradiance spectrum)
         private static readonly Vector3 SunlightColor = new Vector3(1.051f, 0.985f, 0.940f);
@@ -277,25 +261,11 @@ namespace PhotonSky
             skyboxMaterial.SetVector(PropAmbientColor, ambientCol);
             skyboxMaterial.SetVector(PropSkyColorTint, ambientCol * 0.5f);
 
-            // Cloud uniforms
-            skyboxMaterial.SetFloat(PropCloudsEnabled, 1f);
-            skyboxMaterial.SetFloat(PropCloudsCuEnabled, settings.enableCumulusClouds ? 1f : 0f);
-            skyboxMaterial.SetVector(PropCloudsCuCoverage, new Vector2(settings.cloudsCuCoverageMin, settings.cloudsCuCoverageMax));
-            skyboxMaterial.SetFloat(PropCloudsCuAltitude, settings.cloudsCuAltitude);
-            skyboxMaterial.SetFloat(PropCloudsCuThickness, settings.cloudsCuThickness);
-            skyboxMaterial.SetFloat(PropCloudsCuDensity, settings.cloudsCuDensity);
-
-            skyboxMaterial.SetFloat(PropCloudsAcEnabled, settings.enableAltocumulusClouds ? 1f : 0f);
-            skyboxMaterial.SetVector(PropCloudsAcCoverage, new Vector2(settings.cloudsAcCoverageMin, settings.cloudsAcCoverageMax));
-            skyboxMaterial.SetFloat(PropCloudsAcAltitude, settings.cloudsAcAltitude);
-            skyboxMaterial.SetFloat(PropCloudsAcThickness, settings.cloudsAcThickness);
-
-            skyboxMaterial.SetFloat(PropCloudsCiEnabled, settings.enableCirrusClouds ? 1f : 0f);
-            skyboxMaterial.SetVector(PropCloudsCiCoverage, new Vector2(settings.cloudsCiCoverageMin, settings.cloudsCiCoverageMax));
-            skyboxMaterial.SetFloat(PropCloudsCiAltitude, settings.cloudsCiAltitude);
-            skyboxMaterial.SetFloat(PropCloudsCiThickness, 1500f);
-
-            skyboxMaterial.SetFloat(PropWorldAge, _worldAge);
+            // Cloud uniforms (for CloudsInline.hlsl)
+            skyboxMaterial.SetFloat(PropCloudsCoverage, settings.cloudsCuCoverageMax);
+            skyboxMaterial.SetFloat(PropCloudsAltitude, settings.cloudsCuAltitude);
+            skyboxMaterial.SetFloat(PropCloudsThickness, settings.cloudsCuThickness);
+            skyboxMaterial.SetFloat(PropCloudsSpeed, 1.0f);
 
             Camera cam = Camera.main;
             if (cam != null)

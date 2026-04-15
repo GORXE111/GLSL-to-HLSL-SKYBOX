@@ -420,6 +420,12 @@ Shader "Photon/Skybox"
             }
 
             // ================================================================
+            //  Volumetric clouds (inline, self-contained)
+            //  Ref: photon/shaders/include/sky/clouds.glsl
+            // ================================================================
+            #include "Include/CloudsInline.hlsl"
+
+            // ================================================================
             //  Fragment shader — main sky rendering
             //  Ref: photon/shaders/include/sky/sky.glsl:107-166 — draw_sky()
             //  Combines atmosphere scattering, sun disk, stars, weather, caves.
@@ -537,6 +543,14 @@ Shader "Photon/Skybox"
                 // Ref: sky.glsl:118-119 — stars drawn during PROGRAM_DEFERRED3
                 float night = smoothstep(0.0, -0.15, sun_dir.y);
                 sky += draw_stars(rd) * T_final * night;
+
+                // --- Clouds ---
+                // Ref: sky.glsl:154-158 — clouds composited after atmosphere, before rain
+                float cloud_dither = frac(52.9829189 * frac(0.06711056 * i.pos.x + 0.00583715 * i.pos.y));
+                float3 sky_col_for_clouds = sky * 0.15; // approximate ambient sky color for cloud lighting
+                float4 clouds = draw_clouds(rd, sky, sun_dir, moon_dir, sun_irr, sky_col_for_clouds, cloud_dither);
+                sky *= clouds.a;     // transmittance — sky behind clouds is attenuated
+                sky += clouds.rgb;   // scattering — cloud color added
 
                 // --- Rain sky ---
                 // Ref: sky.glsl:149-150 — weather_color blend

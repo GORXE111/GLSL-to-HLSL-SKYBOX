@@ -35,22 +35,25 @@ float  _CloudsSpeed;      // Wind speed multiplier
 //  We use hash-based value noise instead of texture lookups.
 // ============================================================
 
-// Simple 2D value noise
+// Simple 2D value noise — hashes all 4 cell corners independently
+float hash_2d(float2 p) {
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
 float value_noise(float2 p) {
-    float2 ip;
-    float2 f = modf(p, ip);
+    float2 ip = floor(p);
+    float2 f = frac(p);
     f = f * f * (3.0 - 2.0 * f); // cubic smooth
 
-    // Ref: hash from utility/random.glsl — hash4(vec2)
-    float4 h = frac(float4(ip.xyxy) * float4(.1031, .1030, .0973, .1099));
-    h += dot(h, h.wzxy + 33.33);
-    float4 corners = frac((h.xxyz + h.yzzw) * h.zywx);
+    // Hash each of the 4 cell corners independently
+    float c00 = hash_2d(ip + float2(0, 0));
+    float c10 = hash_2d(ip + float2(1, 0));
+    float c01 = hash_2d(ip + float2(0, 1));
+    float c11 = hash_2d(ip + float2(1, 1));
 
-    return lerp(
-        lerp(corners.x, corners.y, f.x),
-        lerp(corners.z, corners.w, f.x),
-        f.y
-    );
+    return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
 }
 
 // FBM 2D noise (3 octaves)
@@ -62,25 +65,30 @@ float fbm2(float2 p) {
     return v / 0.875;
 }
 
-// Simple 3D value noise for cloud detail
+// Simple 3D value noise — hashes all 8 cell corners independently
+float hash_3d(float3 p) {
+    p = frac(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return frac((p.x + p.y) * p.z);
+}
+
 float value_noise_3d(float3 p) {
-    float3 ip;
-    float3 f = modf(p, ip);
+    float3 ip = floor(p);
+    float3 f = frac(p);
     f = f * f * (3.0 - 2.0 * f);
 
-    // Hash 8 corners
-    float2 uv = ip.xy + ip.z * 37.0;
-    float4 h = frac(float4(uv.xyxy) * float4(.1031, .1030, .0973, .1099));
-    h += dot(h, h.wzxy + 33.33);
-    float4 c0 = frac((h.xxyz + h.yzzw) * h.zywx);
+    // Hash each of 8 corners
+    float c000 = hash_3d(ip + float3(0,0,0));
+    float c100 = hash_3d(ip + float3(1,0,0));
+    float c010 = hash_3d(ip + float3(0,1,0));
+    float c110 = hash_3d(ip + float3(1,1,0));
+    float c001 = hash_3d(ip + float3(0,0,1));
+    float c101 = hash_3d(ip + float3(1,0,1));
+    float c011 = hash_3d(ip + float3(0,1,1));
+    float c111 = hash_3d(ip + float3(1,1,1));
 
-    uv = ip.xy + (ip.z + 1.0) * 37.0;
-    h = frac(float4(uv.xyxy) * float4(.1031, .1030, .0973, .1099));
-    h += dot(h, h.wzxy + 33.33);
-    float4 c1 = frac((h.xxyz + h.yzzw) * h.zywx);
-
-    float n0 = lerp(lerp(c0.x, c0.y, f.x), lerp(c0.z, c0.w, f.x), f.y);
-    float n1 = lerp(lerp(c1.x, c1.y, f.x), lerp(c1.z, c1.w, f.x), f.y);
+    float n0 = lerp(lerp(c000, c100, f.x), lerp(c010, c110, f.x), f.y);
+    float n1 = lerp(lerp(c001, c101, f.x), lerp(c011, c111, f.x), f.y);
     return lerp(n0, n1, f.z);
 }
 
@@ -152,8 +160,11 @@ float cloud_density_cu(float3 pos, float cu_radius, float cu_thick, float covera
     float2 xz = pos.xz + wind_vel * _FrameTime;
 
     // clouds.glsl:109-111 — 2D noise for shape + coverage (replaces noisetex)
-    float n_coverage = fbm2(xz * 0.000002);
-    float n_shape = value_noise(xz * 0.000027);
+    // Photon's UV scales are for MC world coords (~1e5 range). In our skybox
+    // atmosphere space, xz spans ~-20000 to +20000m. We scale up to get
+    // visible cloud variation across the sky.
+    float n_coverage = fbm2(xz * 0.0003);
+    float n_shape = value_noise(xz * 0.004);
 
     // clouds.glsl:114-116 — density from coverage and shape
     float density = lerp(coverage * 0.5, coverage, n_coverage);
@@ -166,7 +177,7 @@ float cloud_density_cu(float3 pos, float cu_radius, float cu_thick, float covera
     if (density < 1e-4) return 0.0;
 
     // clouds.glsl:126-131 — 3D detail erosion (replaces Worley texture)
-    float detail = value_noise_3d(pos * 0.001);
+    float detail = value_noise_3d(pos * 0.002);
     density -= 0.33 * detail * detail * saturate(1.0 - density);
 
     // clouds.glsl:140-142 — final shaping

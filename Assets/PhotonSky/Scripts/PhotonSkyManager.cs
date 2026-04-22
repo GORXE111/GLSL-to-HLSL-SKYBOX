@@ -267,37 +267,8 @@ namespace PhotonSky
             skyboxMaterial.SetFloat(PropCloudsThickness, settings.cloudsCuThickness);
             skyboxMaterial.SetFloat(PropCloudsSpeed, 1.0f);
 
-            Camera cam = Camera.main;
-            if (cam != null)
-            {
-                skyboxMaterial.SetVector(PropCameraPosition, cam.transform.position);
-                skyboxMaterial.SetFloat(PropEyeAltitude, cam.transform.position.y);
-            }
-            else
-            {
-                skyboxMaterial.SetVector(PropCameraPosition, Vector3.zero);
-                skyboxMaterial.SetFloat(PropEyeAltitude, 0f);
-            }
-
-            // LUT textures
-            if (lutBaker != null)
-            {
-                if (lutBaker.TransmittanceLUT != null)
-                    skyboxMaterial.SetTexture(PropTransmittanceLUT, lutBaker.TransmittanceLUT);
-                if (lutBaker.ScatteringLUT != null)
-                    skyboxMaterial.SetTexture(PropScatteringLUT, lutBaker.ScatteringLUT);
-            }
-
-            // Noise textures
-            if (noiseBaker != null)
-            {
-                if (noiseBaker.NoiseTex2D != null)
-                    skyboxMaterial.SetTexture(PropNoiseTex, noiseBaker.NoiseTex2D);
-                if (noiseBaker.WorleyTex3D != null)
-                    skyboxMaterial.SetTexture(PropWorleyTex, noiseBaker.WorleyTex3D);
-                if (noiseBaker.CurlTex3D != null)
-                    skyboxMaterial.SetTexture(PropCurlTex, noiseBaker.CurlTex3D);
-            }
+            // Note: CloudsInline.hlsl uses procedural noise, no texture dependencies.
+            // LUT/noise textures are not used by the current inline rendering path.
         }
     }
 }
